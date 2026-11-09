@@ -1,24 +1,43 @@
 name: Build APK
 on:
   workflow_dispatch:
-  push:
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unzip project
-        run: unzip -q Outlawe-Empire.zip
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/cache@v4
         with:
-          gradle-version: 8.7
-      - name: Build
-        run: gradle -p Outlawe-Empire assembleDebug
+          path: keystore
+          key: outlawe-keystore-v1
+      - name: Create keystore if missing
+        run: |
+          mkdir -p keystore
+          [ -f keystore/outlawe.jks ] || keytool -genkeypair -keystore keystore/outlawe.jks -storepass outlawe123 -keypass outlawe123 -alias outlawe -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=OutlaweEmpire"
+      - name: Unzip project
+        run: unzip -q Outlawe-Empire.zip -d proj
+      - name: Compile launcher to dex
+        run: |
+          set -e
+          cd proj
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          PLAT=$(ls -d "$SDK"/platforms/android-*/ | sort -V | tail -1)
+          BT=$(ls -d "$SDK"/build-tools/*/ | sort -V | tail -1)
+          mkdir -p build/classes build/dex
+          javac -source 8 -target 8 -encoding UTF-8 -cp "${PLAT}android.jar" -d build/classes $(find src -name '*.java')
+          "${BT}d8" --release --min-api 26 --lib "${PLAT}android.jar" --output build/dex $(find build/classes -name '*.class')
+          echo "BT=$BT" >> "$GITHUB_ENV"
+      - name: Patch, align and sign
+        run: |
+          set -e
+          python3 proj/tools/patch_apk.py client.apk proj/build/dex/classes.dex proj/assets_outlawe proj/build/unsigned.apk
+          "${BT}zipalign" -p -f 4 proj/build/unsigned.apk proj/build/aligned.apk
+          "${BT}apksigner" sign --ks keystore/outlawe.jks --ks-pass pass:outlawe123 --key-pass pass:outlawe123 --out Outlawe-Empire.apk proj/build/aligned.apk
       - uses: actions/upload-artifact@v4
         with:
           name: OutlaweEmpire-APK
-          path: Outlawe-Empire/app/build/outputs/apk/debug/*.apk
+          path: Outlawe-Empire.apk
